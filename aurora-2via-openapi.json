@@ -1,0 +1,377 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Aurora Gás · API 2ª Via e Cadastro (Mock Workshop)",
+    "description": "Conjunto de tools para o assistente de 2ª via e atualização cadastral da Aurora Gás no canal 0800/WhatsApp. Cobre identificação do cliente, consulta de contas, emissão de 2ª via e código de barras, envio por WhatsApp/e-mail com protocolo, e atualização de cadastro. Ambiente de MOCK para o workshop Partner Program da indigo.ai — nenhum dado real.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://SEU-MOCK-PUBLICO.exemplo",
+      "description": "Substitua pela URL pública do mock (a URL do cloudflared/ngrok apontando para aurora_mock.py)."
+    }
+  ],
+  "paths": {
+    "/identificar": {
+      "post": {
+        "operationId": "identificar_cliente",
+        "summary": "Identifica o cliente por CPF ou código de instalação",
+        "description": "Objetivo: identifica o cliente e retorna seus dados de cadastro e a lista de instalações vinculadas.\n\nUse esta tool quando o cliente:\n- informar o CPF ou o código de instalação;\n- disser frases como \"meu CPF é...\", \"o número da instalação é...\".\n\nÉ o PRIMEIRO passo obrigatório: sem identificar o cliente, NÃO é possível emitir 2ª via nem atualizar cadastro.\n\nDados mínimos: `cpf` OU `codigo_instalacao` (pelo menos um).\n\nNotas:\n- Se retornar 404, o cliente não foi encontrado — peça o dado novamente (o fluxo prevê até 2 tentativas na URA).\n- O campo `qtd_instalacoes` decide o caminho seguinte: se for 1, siga para `consultar_contas`; se for maior que 1, use `validar_endereco_instalacao` para descobrir de qual instalação o cliente fala.\n\nExemplos:\n- Cliente: \"meu CPF é 111.111.111-11\" -> identificar_cliente.\n- Cliente: \"o código da minha instalação é 3001\" -> identificar_cliente.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cpf": {
+                    "type": "string",
+                    "description": "CPF do cliente. Pode vir com ou sem pontuação.",
+                    "example": "111.111.111-11"
+                  },
+                  "codigo_instalacao": {
+                    "type": "string",
+                    "description": "Código da instalação, alternativa ao CPF.",
+                    "example": "3001"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cliente identificado. Retorna cliente_id, nome, telefone/e-mail de cadastro, qtd_instalacoes e a lista de instalações."
+          },
+          "400": {
+            "description": "Nem cpf nem codigo_instalacao foram informados."
+          },
+          "404": {
+            "description": "Cliente não encontrado."
+          }
+        }
+      }
+    },
+    "/instalacoes/{instalacao_id}/contas": {
+      "get": {
+        "operationId": "consultar_contas",
+        "summary": "Lista as contas de uma instalação (abertas ou todas)",
+        "description": "Objetivo: lista as contas de uma instalação. Por padrão retorna só as contas EM ABERTO.\n\nUse esta tool logo após identificar o cliente com 1 instalação, para saber quais contas existem antes de oferecer a 2ª via ou o código de barras.\n\nDados mínimos: `instalacao_id` (obtido em identificar_cliente).\n\nParâmetros:\n- `status`: `aberto` (padrão) ou `todas`.\n- `limit`: número máximo de contas (use `status=todas&limit=3` para \"ouvir as 3 últimas contas\" quando não houver conta em aberto).\n\nNotas:\n- Se `total` for 0 com `status=aberto`, o cliente não tem conta em aberto: ofereça buscar por valor/vencimento (`buscar_conta`) ou as 3 últimas (`status=todas&limit=3`).\n- NÃO use para instalação ainda não identificada -> use identificar_cliente antes.\n\nExemplos:\n- Depois de identificar Maria (1 instalação) -> consultar_contas(status=aberto).\n- Cliente: \"quero ouvir minhas últimas contas\" -> consultar_contas(status=todas, limit=3).",
+        "parameters": [
+          {
+            "name": "instalacao_id",
+            "in": "path",
+            "required": true,
+            "description": "ID da instalação retornado por identificar_cliente.",
+            "example": "INST-1001",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Filtro de status das contas.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "aberto",
+                "todas"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Número máximo de contas retornadas.",
+            "example": 3,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de contas com conta_id, referência, valor, vencimento e status."
+          },
+          "404": {
+            "description": "Instalação não encontrada."
+          }
+        }
+      }
+    },
+    "/instalacoes/{instalacao_id}/contas/buscar": {
+      "post": {
+        "operationId": "buscar_conta",
+        "summary": "Localiza uma conta por valor e/ou vencimento",
+        "description": "Objetivo: localiza uma conta específica de uma instalação a partir do valor e/ou do vencimento informado pelo cliente.\n\nUse esta tool quando o cliente NÃO tem conta em aberto (consultar_contas com status=aberto retornou vazio) e ele informa o valor ou a data de vencimento da conta que deseja.\n\nDados mínimos: `instalacao_id` + `valor` e/ou `vencimento`.\n\nNotas:\n- NÃO use para listar contas em aberto -> use consultar_contas.\n- Se retornar vazio, a conta não foi localizada: siga a regra de escape (derivar / encerrar / migrar para WhatsApp).\n\nExemplos:\n- Cliente: \"a conta era de uns 165 reais\" -> buscar_conta(valor=165.30).\n- Cliente: \"venceu dia 10 de fevereiro\" -> buscar_conta(vencimento=2026-02-10).",
+        "parameters": [
+          {
+            "name": "instalacao_id",
+            "in": "path",
+            "required": true,
+            "description": "ID da instalação.",
+            "example": "INST-2001",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "valor": {
+                    "type": "number",
+                    "description": "Valor da conta.",
+                    "example": 165.3
+                  },
+                  "vencimento": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Vencimento no formato AAAA-MM-DD.",
+                    "example": "2026-02-10"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Contas que bateram com o filtro."
+          },
+          "400": {
+            "description": "Nenhum critério (valor/vencimento) informado."
+          },
+          "404": {
+            "description": "Instalação não encontrada."
+          }
+        }
+      }
+    },
+    "/clientes/{cliente_id}/validar-endereco": {
+      "post": {
+        "operationId": "validar_endereco_instalacao",
+        "summary": "Descobre a instalação por CEP e/ou nome da rua",
+        "description": "Objetivo: quando o cliente tem MAIS DE UMA instalação, descobre de qual ele está falando validando CEP e/ou nome da rua.\n\nUse esta tool logo após identificar_cliente quando `qtd_instalacoes` for maior que 1, antes de consultar contas.\n\nDados mínimos: `cliente_id` + `cep` e/ou `rua`.\n\nNotas:\n- NÃO use quando o cliente tem apenas 1 instalação -> vá direto para consultar_contas.\n- Se retornar 404 (nenhum match), siga a regra de escape e registre a estatística de falha de validação de CEP/rua.\n\nExemplos:\n- Ana tem 3 instalações e diz \"é a da Rua Verde\" -> validar_endereco_instalacao(rua=\"Rua Verde\").\n- Cliente: \"o CEP é 03000-000\" -> validar_endereco_instalacao(cep=\"03000-000\").",
+        "parameters": [
+          {
+            "name": "cliente_id",
+            "in": "path",
+            "required": true,
+            "description": "ID do cliente retornado por identificar_cliente.",
+            "example": "CLI-3001",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cep": {
+                    "type": "string",
+                    "description": "CEP da instalação.",
+                    "example": "03000-000"
+                  },
+                  "rua": {
+                    "type": "string",
+                    "description": "Nome (ou parte) da rua da instalação.",
+                    "example": "Rua Verde"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Instalação identificada (match=true, instalacao_id, endereço)."
+          },
+          "404": {
+            "description": "Nenhuma instalação bateu com o CEP/rua."
+          }
+        }
+      }
+    },
+    "/contas/{conta_id}/segunda-via": {
+      "post": {
+        "operationId": "emitir_segunda_via",
+        "summary": "Emite a 2ª via (PDF da fatura) de uma conta",
+        "description": "Objetivo: emite a SEGUNDA VIA da fatura (documento PDF completo da conta) e devolve o link do documento.\n\nUse esta tool quando o cliente pede explicitamente a \"2ª via\", a \"fatura\", a \"conta\" ou o \"boleto em PDF\".\n\nNÃO use quando o cliente pede apenas o CÓDIGO DE BARRAS ou a linha digitável para pagar -> nesse caso use emitir_codigo_barras.\n\nDados mínimos: `conta_id` (obtido em consultar_contas ou buscar_conta).\n\nNotas:\n- Só chame após ter uma conta identificada.\n- Depois de emitir, use enviar_documento para entregar ao cliente por WhatsApp ou e-mail.\n\nExemplos:\n- Cliente: \"quero a 2ª via da minha conta\" -> emitir_segunda_via.\n- Cliente: \"me manda a fatura em PDF\" -> emitir_segunda_via.",
+        "parameters": [
+          {
+            "name": "conta_id",
+            "in": "path",
+            "required": true,
+            "description": "ID da conta.",
+            "example": "CT-1001A",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "2ª via emitida (documento_url, valor, vencimento)."
+          },
+          "404": {
+            "description": "Conta não encontrada."
+          }
+        }
+      }
+    },
+    "/contas/{conta_id}/codigo-barras": {
+      "post": {
+        "operationId": "emitir_codigo_barras",
+        "summary": "Gera o código de barras / linha digitável de uma conta",
+        "description": "Objetivo: gera APENAS o código de barras e a linha digitável de uma conta, para o cliente pagar sem precisar do PDF inteiro.\n\nUse esta tool quando o cliente pede o \"código de barras\", a \"linha digitável\" ou \"o número para pagar\".\n\nNÃO use quando o cliente quer o documento/PDF da fatura completo -> nesse caso use emitir_segunda_via.\n\nDados mínimos: `conta_id`.\n\nNotas:\n- Depois de gerar, use enviar_documento para entregar por WhatsApp ou e-mail.\n\nExemplos:\n- Cliente: \"só me passa o código de barras\" -> emitir_codigo_barras.\n- Cliente: \"quero a linha digitável pra pagar no app do banco\" -> emitir_codigo_barras.",
+        "parameters": [
+          {
+            "name": "conta_id",
+            "in": "path",
+            "required": true,
+            "description": "ID da conta.",
+            "example": "CT-1001A",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Código de barras e linha digitável gerados."
+          },
+          "404": {
+            "description": "Conta não encontrada."
+          }
+        }
+      }
+    },
+    "/envios": {
+      "post": {
+        "operationId": "enviar_documento",
+        "summary": "Envia 2ª via ou código de barras por WhatsApp ou e-mail e gera protocolo",
+        "description": "Objetivo: entrega o documento (2ª via ou código de barras) ao cliente pelo canal escolhido e devolve o número de protocolo do atendimento.\n\nUse esta tool logo após emitir_segunda_via ou emitir_codigo_barras, quando o cliente escolheu receber por WhatsApp ou e-mail. Envie sem aguardar nova interação do cliente.\n\nDados mínimos: `canal` (whatsapp|email), `destino` (número ou e-mail) e `conta_id`.\n\nNotas:\n- Sempre informe o `protocolo` retornado ao cliente.\n- IMPORTANTE: se `telefone_diverge` vier `true`, o número informado é diferente do cadastro — ofereça ATUALIZAR o cadastro (atualizar_cadastro) após confirmar o envio.\n- Confirme o número/e-mail com o cliente antes de enviar.\n\nExemplos:\n- Cliente: \"manda no meu WhatsApp 11 91111-2222\" -> enviar_documento(canal=whatsapp, destino=\"+5511911112222\").\n- Cliente: \"prefiro por e-mail\" -> enviar_documento(canal=email, destino=\"cliente@exemplo.com\").",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "canal",
+                  "destino",
+                  "conta_id"
+                ],
+                "properties": {
+                  "canal": {
+                    "type": "string",
+                    "enum": [
+                      "whatsapp",
+                      "email"
+                    ],
+                    "description": "Canal de envio."
+                  },
+                  "destino": {
+                    "type": "string",
+                    "description": "Número de WhatsApp (formato internacional) ou e-mail.",
+                    "example": "+5511911112222"
+                  },
+                  "conta_id": {
+                    "type": "string",
+                    "description": "ID da conta cujo documento será enviado.",
+                    "example": "CT-1001A"
+                  },
+                  "tipo": {
+                    "type": "string",
+                    "enum": [
+                      "2via",
+                      "codigo_barras"
+                    ],
+                    "description": "O que está sendo enviado.",
+                    "example": "2via"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enviado. Retorna protocolo, status e telefone_diverge."
+          },
+          "400": {
+            "description": "Dados de envio incompletos."
+          },
+          "404": {
+            "description": "Conta não encontrada."
+          }
+        }
+      }
+    },
+    "/clientes/{cliente_id}/cadastro": {
+      "patch": {
+        "operationId": "atualizar_cadastro",
+        "summary": "Atualiza e-mail e/ou telefone do cadastro do cliente",
+        "description": "Objetivo: atualiza os dados cadastrais (e-mail e/ou telefone) do cliente.\n\nUse esta tool quando:\n- o cliente pede para atualizar o cadastro; OU\n- após um envio em que `telefone_diverge` veio `true` e o cliente aceitou atualizar.\n\nDados mínimos: `cliente_id` + `email` e/ou `telefone`.\n\nNotas:\n- Confirme o novo dado com o cliente antes de gravar (o fluxo prevê até 3 tentativas de confirmação).\n- Ao concluir, informe ao cliente que a atualização foi realizada com sucesso.\n\nExemplos:\n- Cliente: \"troca meu telefone para 11 91111-2222\" -> atualizar_cadastro(telefone=\"+5511911112222\").\n- Cliente: \"meu novo e-mail é novo@exemplo.com\" -> atualizar_cadastro(email=\"novo@exemplo.com\").",
+        "parameters": [
+          {
+            "name": "cliente_id",
+            "in": "path",
+            "required": true,
+            "description": "ID do cliente.",
+            "example": "CLI-4001",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "description": "Novo e-mail.",
+                    "example": "novo@exemplo.com"
+                  },
+                  "telefone": {
+                    "type": "string",
+                    "description": "Novo telefone (formato internacional).",
+                    "example": "+5511911112222"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cadastro atualizado. Retorna o cliente já com os dados novos."
+          },
+          "400": {
+            "description": "Nenhum dado (email/telefone) informado."
+          },
+          "404": {
+            "description": "Cliente não encontrado."
+          }
+        }
+      }
+    }
+  }
+}
